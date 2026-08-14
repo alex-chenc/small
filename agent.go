@@ -151,7 +151,7 @@ func (o *compactModelOutput) writeContent(text string) {
 
 func (a *Agent) Run(ctx context.Context, task string) error {
 	stdout, stderr := newTerminalOutputs(a.stdout, a.stderr)
-	fmt.Fprintf(stdout, "◆ 开始执行：%s\n", task)
+	fmt.Fprintf(stdout, "◆ Starting task: %s\n", task)
 
 	messages := []chatMessage{
 		{Role: "system", Content: a.client.instructions},
@@ -174,14 +174,14 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 				modelOutput.WriteText(delta)
 			},
 			func(event apiRetryEvent) {
-				reason := "网络错误"
+				reason := "network error"
 				if event.StatusCode != 0 {
 					reason = fmt.Sprintf("HTTP %d", event.StatusCode)
 				}
 				stdout.ensureLineStart()
 				fmt.Fprintf(
 					stdout,
-					"◆ OpenAPI 暂时不可用：%s，%s 后重试 %d/%d\n",
+					"◆ OpenAPI temporarily unavailable: %s; retrying in %s (%d/%d)\n",
 					reason,
 					formatRetryDelay(event.Delay),
 					event.Attempt,
@@ -207,7 +207,7 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 				return err
 			}
 			if toolCall.ID == "" {
-				return errors.New("工具调用缺少 id")
+				return errors.New("tool call is missing an id")
 			}
 			call := functionCall{
 				CallID:    toolCall.ID,
@@ -222,7 +222,7 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 			result := a.executeCall(ctx, call, stdout, stderr)
 			resultJSON, err := json.Marshal(result)
 			if err != nil {
-				return fmt.Errorf("编码命令结果：%w", err)
+				return fmt.Errorf("encode command result: %w", err)
 			}
 			outputMessage := chatMessage{
 				Role:       "tool",
@@ -234,7 +234,7 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 		}
 	}
 
-	return fmt.Errorf("Agent 超过最大循环次数 %d", maxAgentTurns)
+	return fmt.Errorf("agent exceeded the maximum turn limit of %d", maxAgentTurns)
 }
 
 func formatRetryDelay(delay time.Duration) string {
@@ -249,16 +249,16 @@ func formatRetryDelay(delay time.Duration) string {
 
 func (a *Agent) executeCall(ctx context.Context, call functionCall, stdout, stderr *terminalOutput) CommandResult {
 	if call.Name != "exec_command" {
-		return CommandResult{ExitCode: -1, Stderr: "不支持的工具：" + call.Name}
+		return CommandResult{ExitCode: -1, Stderr: "unsupported tool: " + call.Name}
 	}
 
 	var args execCommandArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
-		return CommandResult{ExitCode: -1, Stderr: "exec_command 参数不是有效 JSON：" + err.Error()}
+		return CommandResult{ExitCode: -1, Stderr: "exec_command arguments are not valid JSON: " + err.Error()}
 	}
 	args.Command = strings.TrimSpace(args.Command)
 	if args.Command == "" {
-		return CommandResult{ExitCode: -1, Stderr: "exec_command.cmd 不能为空"}
+		return CommandResult{ExitCode: -1, Stderr: "exec_command.cmd must not be empty"}
 	}
 
 	stdout.ensureLineStart()
@@ -268,9 +268,9 @@ func (a *Agent) executeCall(ctx context.Context, call functionCall, stdout, stde
 	result := a.executor.Execute(ctx, args.Command, time.Duration(args.TimeoutMS)*time.Millisecond, toolStdout, toolStderr)
 	stdout.ensureLineStart()
 	if result.TimedOut {
-		fmt.Fprintf(stdout, "└ 命令超时，退出码 %d，耗时 %dms\n", result.ExitCode, result.DurationMS)
+		fmt.Fprintf(stdout, "└ Command timed out, exit code %d, duration %dms\n", result.ExitCode, result.DurationMS)
 	} else {
-		fmt.Fprintf(stdout, "└ 退出码 %d，耗时 %dms\n", result.ExitCode, result.DurationMS)
+		fmt.Fprintf(stdout, "└ Exit code %d, duration %dms\n", result.ExitCode, result.DurationMS)
 	}
 	return result
 }

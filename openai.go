@@ -135,7 +135,7 @@ func (c *OpenAIClient) createResponse(
 		Stream:     true,
 	})
 	if err != nil {
-		return chatResponse{}, fmt.Errorf("编码 API 请求：%w", err)
+		return chatResponse{}, fmt.Errorf("encode API request: %w", err)
 	}
 
 	for attempt := 0; ; attempt++ {
@@ -150,7 +150,7 @@ func (c *OpenAIClient) createResponse(
 				return chatResponse{}, ctx.Err()
 			}
 			if attempt >= maxAPIRetries {
-				return chatResponse{}, fmt.Errorf("调用 OpenAPI 端点（重试 %d 次后失败）：%w", maxAPIRetries, requestErr)
+				return chatResponse{}, fmt.Errorf("call OpenAPI endpoint (failed after %d retries): %w", maxAPIRetries, requestErr)
 			}
 			delay := exponentialRetryDelay(attempt)
 			notifyRetry(onRetry, apiRetryEvent{
@@ -166,7 +166,7 @@ func (c *OpenAIClient) createResponse(
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBytes))
 			_ = resp.Body.Close()
 			if readErr != nil {
-				return chatResponse{}, fmt.Errorf("OpenAPI 端点返回 HTTP %d，且读取错误内容失败：%w", resp.StatusCode, readErr)
+				return chatResponse{}, fmt.Errorf("OpenAPI endpoint returned HTTP %d and its error body could not be read: %w", resp.StatusCode, readErr)
 			}
 			bodyText := strings.TrimSpace(string(body))
 			if isRetryableStatus(resp.StatusCode) && attempt < maxAPIRetries {
@@ -183,9 +183,9 @@ func (c *OpenAIClient) createResponse(
 				continue
 			}
 			if isRetryableStatus(resp.StatusCode) {
-				return chatResponse{}, fmt.Errorf("OpenAPI 端点返回 HTTP %d（重试 %d 次后仍失败）：%s", resp.StatusCode, maxAPIRetries, bodyText)
+				return chatResponse{}, fmt.Errorf("OpenAPI endpoint returned HTTP %d (still failing after %d retries): %s", resp.StatusCode, maxAPIRetries, bodyText)
 			}
-			return chatResponse{}, fmt.Errorf("OpenAPI 端点返回 HTTP %d：%s", resp.StatusCode, bodyText)
+			return chatResponse{}, fmt.Errorf("OpenAPI endpoint returned HTTP %d: %s", resp.StatusCode, bodyText)
 		}
 
 		defer resp.Body.Close()
@@ -199,7 +199,7 @@ func (c *OpenAIClient) createResponse(
 func (c *OpenAIClient) newRequest(ctx context.Context, payload []byte) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("创建 API 请求：%w", err)
+		return nil, fmt.Errorf("create API request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -278,13 +278,13 @@ type chatCompletion struct {
 func decodeChatJSON(r io.Reader) (chatResponse, error) {
 	var completion chatCompletion
 	if err := json.NewDecoder(r).Decode(&completion); err != nil {
-		return chatResponse{}, fmt.Errorf("解析 OpenAPI 响应：%w", err)
+		return chatResponse{}, fmt.Errorf("decode OpenAPI response: %w", err)
 	}
 	if completion.Error != nil {
 		return chatResponse{}, completion.Error
 	}
 	if len(completion.Choices) == 0 {
-		return chatResponse{}, errors.New("OpenAPI 响应没有 choices")
+		return chatResponse{}, errors.New("OpenAPI response contains no choices")
 	}
 	message := completion.Choices[0].Message
 	if message.Role == "" {
@@ -326,7 +326,7 @@ func decodeChatSSE(r io.Reader, onText func(string)) (chatResponse, error) {
 		}
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("解析 OpenAPI SSE 事件：%w", err)
+			return fmt.Errorf("decode OpenAPI SSE event: %w", err)
 		}
 		if chunk.Error != nil {
 			return chunk.Error
@@ -363,7 +363,7 @@ func decodeChatSSE(r io.Reader, onText func(string)) (chatResponse, error) {
 		return chatResponse{}, err
 	}
 	if !sawEvent {
-		return chatResponse{}, errors.New("OpenAPI 流在返回有效事件之前结束")
+		return chatResponse{}, errors.New("OpenAPI stream ended before a valid event was received")
 	}
 
 	indices := make([]int, 0, len(partialCalls))
@@ -422,7 +422,7 @@ func scanSSEData(r io.Reader, handle func(string) error) error {
 		return err
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取 OpenAPI SSE 响应：%w", err)
+		return fmt.Errorf("read OpenAPI SSE response: %w", err)
 	}
 	return nil
 }

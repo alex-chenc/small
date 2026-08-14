@@ -31,13 +31,13 @@ func loadConfig() (Config, error) {
 		missing = append(missing, envAPIKey)
 	}
 	if exactEndpoint == "" && baseURL == "" {
-		missing = append(missing, envEndpoint+"（或 "+envBaseURL+"）")
+		missing = append(missing, envEndpoint+" (or "+envBaseURL+")")
 	}
 	if model == "" {
 		missing = append(missing, envModel)
 	}
 	if len(missing) > 0 {
-		return Config{}, fmt.Errorf("缺少环境变量：%s", strings.Join(missing, ", "))
+		return Config{}, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
 
 	endpoint := exactEndpoint
@@ -48,7 +48,7 @@ func loadConfig() (Config, error) {
 		endpoint, err = chatCompletionsEndpoint(baseURL)
 	}
 	if err != nil {
-		return Config{}, fmt.Errorf("OpenAI 端点无效：%w", err)
+		return Config{}, fmt.Errorf("invalid OpenAI endpoint: %w", err)
 	}
 
 	return Config{APIKey: apiKey, Endpoint: endpoint, Model: model}, nil
@@ -88,10 +88,10 @@ func parseEndpointURL(value string) (*url.URL, error) {
 		return nil, err
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("必须是包含 http(s) scheme 和主机名的 URL")
+		return nil, fmt.Errorf("must be a URL with an http(s) scheme and host")
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("不能包含 query 或 fragment")
+		return nil, fmt.Errorf("must not contain a query or fragment")
 	}
 	return u, nil
 }

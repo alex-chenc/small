@@ -55,14 +55,14 @@ func (e *CommandExecutor) Execute(ctx context.Context, command string, requested
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return commandStartFailure(started, fmt.Errorf("创建 stdout pipe：%w", err))
+		return commandStartFailure(started, fmt.Errorf("create stdout pipe: %w", err))
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return commandStartFailure(started, fmt.Errorf("创建 stderr pipe：%w", err))
+		return commandStartFailure(started, fmt.Errorf("create stderr pipe: %w", err))
 	}
 	if err := cmd.Start(); err != nil {
-		return commandStartFailure(started, fmt.Errorf("启动命令：%w", err))
+		return commandStartFailure(started, fmt.Errorf("start command: %w", err))
 	}
 
 	var copies sync.WaitGroup

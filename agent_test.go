@@ -47,7 +47,7 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 		if requestNumber == 1 {
 			writeSSE(t, w, map[string]any{
 				"choices": []any{map[string]any{"delta": map[string]any{
-					"role": "assistant", "content": "\n\n计划：执行测试命令。\n\n",
+					"role": "assistant", "content": "\n\nPlan: run the test command.\n\n",
 				}}},
 			})
 			writeSSE(t, w, map[string]any{
@@ -72,7 +72,7 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 
 		writeSSE(t, w, map[string]any{
 			"choices": []any{map[string]any{"delta": map[string]any{
-				"role": "assistant", "content": "\n\n完成：命令执行成功。\n\n",
+				"role": "assistant", "content": "\n\nDone: the command completed successfully.\n\n",
 			}}},
 		})
 		writeSSEDone(w)
@@ -93,18 +93,18 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 		stdout:   &stdout,
 		stderr:   &stderr,
 	}
-	if err := agent.Run(context.Background(), "执行集成测试"); err != nil {
+	if err := agent.Run(context.Background(), "run the integration test"); err != nil {
 		t.Fatalf("Agent.Run() error = %v", err)
 	}
 
 	output := stdout.String()
 	for _, expected := range []string{
-		"◆ 开始执行：执行集成测试",
-		"● 计划：执行测试命令。",
+		"◆ Starting task: run the integration test",
+		"● Plan: run the test command.",
 		"▶ $ printf integration-ok",
 		"│ integration-ok",
-		"└ 退出码 0",
-		"● 完成：命令执行成功。",
+		"└ Exit code 0",
+		"● Done: the command completed successfully.",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("stdout does not contain %q:\n%s", expected, output)
@@ -159,11 +159,11 @@ func TestPrefixedWriterMarksEveryOutputLine(t *testing.T) {
 	terminalStdout, _ := newTerminalOutputs(&stdout, &stderr)
 	writer := &prefixedWriter{output: terminalStdout, prefix: "│ "}
 
-	_, _ = io.WriteString(writer, "第一行\n\n")
-	_, _ = io.WriteString(writer, "第二行")
+	_, _ = io.WriteString(writer, "first line\n\n")
+	_, _ = io.WriteString(writer, "second line")
 	terminalStdout.ensureLineStart()
 
-	want := "│ 第一行\n│ \n│ 第二行\n"
+	want := "│ first line\n│ \n│ second line\n"
 	if stdout.String() != want {
 		t.Fatalf("prefixed output = %q, want %q", stdout.String(), want)
 	}
@@ -172,18 +172,18 @@ func TestPrefixedWriterMarksEveryOutputLine(t *testing.T) {
 func TestOpenAIClientAcceptsNonStreamingChatResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"你好"}}]}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Hello"}}]}`)
 	}))
 	defer server.Close()
 
 	client := OpenAIClient{
 		apiKey: "key", endpoint: server.URL, model: "model", httpClient: server.Client(),
 	}
-	response, err := client.createResponse(context.Background(), []chatMessage{{Role: "user", Content: "你好"}}, nil, nil)
+	response, err := client.createResponse(context.Background(), []chatMessage{{Role: "user", Content: "Hello"}}, nil, nil)
 	if err != nil {
 		t.Fatalf("createResponse() error = %v", err)
 	}
-	if response.Message.Content != "你好" || response.TextStreamed {
+	if response.Message.Content != "Hello" || response.TextStreamed {
 		t.Fatalf("response = %+v", response)
 	}
 }
@@ -199,7 +199,7 @@ func TestOpenAIClientRetriesRateLimitAndReplaysRequest(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"重试成功"}}]}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Retry succeeded"}}]}`)
 	}))
 	defer server.Close()
 
@@ -209,14 +209,14 @@ func TestOpenAIClientRetriesRateLimitAndReplaysRequest(t *testing.T) {
 	var retries []apiRetryEvent
 	response, err := client.createResponse(
 		context.Background(),
-		[]chatMessage{{Role: "user", Content: "你好"}},
+		[]chatMessage{{Role: "user", Content: "Hello"}},
 		nil,
 		func(event apiRetryEvent) { retries = append(retries, event) },
 	)
 	if err != nil {
 		t.Fatalf("createResponse() error = %v", err)
 	}
-	if response.Message.Content != "重试成功" {
+	if response.Message.Content != "Retry succeeded" {
 		t.Fatalf("response content = %q", response.Message.Content)
 	}
 	if requests != 3 || len(retries) != 2 {
@@ -242,8 +242,8 @@ func TestOpenAIClientStopsAfterRateLimitRetries(t *testing.T) {
 	client := OpenAIClient{
 		apiKey: "key", endpoint: server.URL, model: "model", httpClient: server.Client(),
 	}
-	_, err := client.createResponse(context.Background(), []chatMessage{{Role: "user", Content: "你好"}}, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "重试 4 次后仍失败") {
+	_, err := client.createResponse(context.Background(), []chatMessage{{Role: "user", Content: "Hello"}}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "still failing after 4 retries") {
 		t.Fatalf("createResponse() error = %v", err)
 	}
 	if requests != maxAPIRetries+1 {
