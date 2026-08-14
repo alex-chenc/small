@@ -125,7 +125,9 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 	if !requests[0].Stream || requests[0].ToolChoice != "auto" {
 		t.Errorf("unexpected request settings: %+v", requests[0])
 	}
-	if len(requests[0].Tools) != 1 || requests[0].Tools[0].Function.Name != "exec_command" {
+	if len(requests[0].Tools) != 2 ||
+		requests[0].Tools[0].Function.Name != "exec_command" ||
+		requests[0].Tools[1].Function.Name != "request_user_input" {
 		t.Errorf("unexpected tools: %+v", requests[0].Tools)
 	}
 	if len(requests[0].Messages) != 2 || requests[0].Messages[0].Role != "system" || requests[0].Messages[1].Role != "user" {
@@ -151,6 +153,76 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 	}
 	if !foundOutput {
 		t.Fatal("second request did not contain a tool message")
+	}
+}
+
+func TestAgentRequestsUserInputAndContinues(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"I need confirmation.","tool_calls":[{"id":"input_1","type":"function","function":{"name":"request_user_input","arguments":"{\"question\":\"Proceed with the test?\"}"}}]}}]}`)
+			return
+		}
+
+		var foundAnswer bool
+		for _, message := range request.Messages {
+			if message.Role != "tool" || message.ToolCallID != "input_1" {
+				continue
+			}
+			var result requestUserInputResult
+			if err := json.Unmarshal([]byte(message.Content), &result); err != nil {
+				t.Errorf("decode input result: %v", err)
+				continue
+			}
+			foundAnswer = result.Answer == "yes" && result.Error == ""
+		}
+		if !foundAnswer {
+			t.Errorf("request did not contain the expected user answer: %+v", request.Messages)
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Confirmed."}}]}`)
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	agent := Agent{
+		client: &OpenAIClient{
+			apiKey:       "test-key",
+			endpoint:     server.URL,
+			model:        "test-model",
+			instructions: "test instructions",
+			httpClient:   server.Client(),
+		},
+		executor: &CommandExecutor{cwd: t.TempDir()},
+		stdin:    strings.NewReader("yes\n"),
+		stdout:   &stdout,
+		stderr:   &stderr,
+	}
+	if err := agent.Run(context.Background(), "confirm the test"); err != nil {
+		t.Fatalf("Agent.Run() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("request count = %d, want 2", requests)
+	}
+	for _, expected := range []string{
+		"● I need confirmation.",
+		"? Proceed with the test?",
+		"└ Input received",
+		"● Confirmed.",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Errorf("stdout does not contain %q:\n%s", expected, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q", stderr.String())
 	}
 }
 

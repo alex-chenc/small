@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,6 +18,7 @@ const maxAgentTurns = 30
 type Agent struct {
 	client   *OpenAIClient
 	executor *CommandExecutor
+	stdin    io.Reader
 	stdout   io.Writer
 	stderr   io.Writer
 }
@@ -30,6 +32,24 @@ type functionCall struct {
 type execCommandArguments struct {
 	Command   string `json:"cmd"`
 	TimeoutMS int64  `json:"timeout_ms"`
+}
+
+type requestUserInputArguments struct {
+	Question string `json:"question"`
+}
+
+type requestUserInputResult struct {
+	Answer string `json:"answer"`
+	Error  string `json:"error,omitempty"`
+}
+
+type toolErrorResult struct {
+	Error string `json:"error"`
+}
+
+type inputReadResult struct {
+	line string
+	err  error
 }
 
 type outputState struct {
@@ -152,6 +172,11 @@ func (o *compactModelOutput) writeContent(text string) {
 func (a *Agent) Run(ctx context.Context, task string) error {
 	stdout, stderr := newTerminalOutputs(a.stdout, a.stderr)
 	fmt.Fprintf(stdout, "◆ Starting task: %s\n", task)
+	input := a.stdin
+	if input == nil {
+		input = strings.NewReader("")
+	}
+	inputReader := bufio.NewReader(input)
 
 	messages := []chatMessage{
 		{Role: "system", Content: a.client.instructions},
@@ -202,6 +227,14 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 			return nil
 		}
 
+		hasInputRequest := false
+		for _, toolCall := range response.Message.ToolCalls {
+			if toolCall.Function.Name == "request_user_input" {
+				hasInputRequest = true
+				break
+			}
+		}
+		inputHandled := false
 		for _, toolCall := range response.Message.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -219,10 +252,23 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 				continue
 			}
 
-			result := a.executeCall(ctx, call, stdout, stderr)
+			var result any
+			if hasInputRequest && call.Name != "request_user_input" {
+				result = toolErrorResult{Error: "tool call was not executed because user input was requested in the same response; consider the user's answer before calling another tool"}
+			} else if call.Name == "request_user_input" && inputHandled {
+				result = toolErrorResult{Error: "only one request_user_input call is allowed per response"}
+			} else {
+				if call.Name == "request_user_input" {
+					inputHandled = true
+				}
+				result, err = a.executeCall(ctx, call, inputReader, stdout, stderr)
+				if err != nil {
+					return err
+				}
+			}
 			resultJSON, err := json.Marshal(result)
 			if err != nil {
-				return fmt.Errorf("encode command result: %w", err)
+				return fmt.Errorf("encode tool result: %w", err)
 			}
 			outputMessage := chatMessage{
 				Role:       "tool",
@@ -247,30 +293,84 @@ func formatRetryDelay(delay time.Duration) string {
 	return delay.Round(100 * time.Millisecond).String()
 }
 
-func (a *Agent) executeCall(ctx context.Context, call functionCall, stdout, stderr *terminalOutput) CommandResult {
-	if call.Name != "exec_command" {
-		return CommandResult{ExitCode: -1, Stderr: "unsupported tool: " + call.Name}
-	}
+func (a *Agent) executeCall(
+	ctx context.Context,
+	call functionCall,
+	input *bufio.Reader,
+	stdout, stderr *terminalOutput,
+) (any, error) {
+	switch call.Name {
+	case "exec_command":
+		var args execCommandArguments
+		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+			return CommandResult{ExitCode: -1, Stderr: "exec_command arguments are not valid JSON: " + err.Error()}, nil
+		}
+		args.Command = strings.TrimSpace(args.Command)
+		if args.Command == "" {
+			return CommandResult{ExitCode: -1, Stderr: "exec_command.cmd must not be empty"}, nil
+		}
 
-	var args execCommandArguments
-	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
-		return CommandResult{ExitCode: -1, Stderr: "exec_command arguments are not valid JSON: " + err.Error()}
-	}
-	args.Command = strings.TrimSpace(args.Command)
-	if args.Command == "" {
-		return CommandResult{ExitCode: -1, Stderr: "exec_command.cmd must not be empty"}
-	}
+		stdout.ensureLineStart()
+		fmt.Fprintf(stdout, "▶ $ %s\n", args.Command)
+		toolStdout := &prefixedWriter{output: stdout, prefix: "│ "}
+		toolStderr := &prefixedWriter{output: stderr, prefix: "│ "}
+		result := a.executor.Execute(ctx, args.Command, time.Duration(args.TimeoutMS)*time.Millisecond, toolStdout, toolStderr)
+		stdout.ensureLineStart()
+		if result.TimedOut {
+			fmt.Fprintf(stdout, "└ Command timed out, exit code %d, duration %dms\n", result.ExitCode, result.DurationMS)
+		} else {
+			fmt.Fprintf(stdout, "└ Exit code %d, duration %dms\n", result.ExitCode, result.DurationMS)
+		}
+		return result, nil
 
-	stdout.ensureLineStart()
-	fmt.Fprintf(stdout, "▶ $ %s\n", args.Command)
-	toolStdout := &prefixedWriter{output: stdout, prefix: "│ "}
-	toolStderr := &prefixedWriter{output: stderr, prefix: "│ "}
-	result := a.executor.Execute(ctx, args.Command, time.Duration(args.TimeoutMS)*time.Millisecond, toolStdout, toolStderr)
-	stdout.ensureLineStart()
-	if result.TimedOut {
-		fmt.Fprintf(stdout, "└ Command timed out, exit code %d, duration %dms\n", result.ExitCode, result.DurationMS)
-	} else {
-		fmt.Fprintf(stdout, "└ Exit code %d, duration %dms\n", result.ExitCode, result.DurationMS)
+	case "request_user_input":
+		var args requestUserInputArguments
+		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+			return requestUserInputResult{Error: "request_user_input arguments are not valid JSON: " + err.Error()}, nil
+		}
+		question := strings.Join(strings.Fields(args.Question), " ")
+		if question == "" {
+			return requestUserInputResult{Error: "request_user_input.question must not be empty"}, nil
+		}
+
+		stdout.ensureLineStart()
+		fmt.Fprintf(stdout, "? %s\n", question)
+		answer, err := readUserInput(ctx, input)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			fmt.Fprintf(stdout, "└ Input unavailable: %s\n", err)
+			return requestUserInputResult{Error: err.Error()}, nil
+		}
+		fmt.Fprintln(stdout, "└ Input received")
+		return requestUserInputResult{Answer: strings.TrimSpace(answer)}, nil
+
+	default:
+		return CommandResult{ExitCode: -1, Stderr: "unsupported tool: " + call.Name}, nil
 	}
-	return result
+}
+
+func readUserInput(ctx context.Context, input *bufio.Reader) (string, error) {
+	resultCh := make(chan inputReadResult, 1)
+	go func() {
+		line, err := input.ReadString('\n')
+		resultCh <- inputReadResult{line: line, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case result := <-resultCh:
+		if result.err == nil {
+			return result.line, nil
+		}
+		if errors.Is(result.err, io.EOF) {
+			if result.line != "" {
+				return result.line, nil
+			}
+			return "", errors.New("stdin closed before user input was received")
+		}
+		return "", fmt.Errorf("read user input: %w", result.err)
+	}
 }

@@ -69,6 +69,7 @@ func run() int {
 	agent := &Agent{
 		client:   client,
 		executor: &CommandExecutor{cwd: cwd},
+		stdin:    os.Stdin,
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 	}

@@ -121,6 +121,31 @@ func execCommandTool() chatToolDefinition {
 	}
 }
 
+func requestUserInputTool() chatToolDefinition {
+	return chatToolDefinition{
+		Type: "function",
+		Function: chatFunctionDefinition{
+			Name:        "request_user_input",
+			Description: "Ask the user one concise question and wait for one line of terminal input when required information or confirmation is missing. Returns JSON containing answer or error. Never request credentials or secrets.",
+			Parameters: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"question": map[string]any{
+						"type":        "string",
+						"description": "The single concise question to show to the user.",
+					},
+				},
+				"required": []string{"question"},
+			},
+		},
+	}
+}
+
+func agentTools() []chatToolDefinition {
+	return []chatToolDefinition{execCommandTool(), requestUserInputTool()}
+}
+
 func (c *OpenAIClient) createResponse(
 	ctx context.Context,
 	messages []chatMessage,
@@ -130,7 +155,7 @@ func (c *OpenAIClient) createResponse(
 	payload, err := json.Marshal(chatRequest{
 		Model:      c.model,
 		Messages:   messages,
-		Tools:      []chatToolDefinition{execCommandTool()},
+		Tools:      agentTools(),
 		ToolChoice: "auto",
 		Stream:     true,
 	})
