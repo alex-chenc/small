@@ -1,5 +1,7 @@
 # small
 
+[简体中文](README.md) | [English](README_EN.md)
+
 ## 构建
 
 ```bash
@@ -32,3 +34,7 @@ export OPENAI_BASE_URL="https://你的服务地址/v1"
 ./small 查看当前主机的内存占用
 ./small "找出当前目录中最大的 10 个文件，但不要删除"
 ```
+
+## 开源协议
+
+[Apache License 2.0](LICENSE)

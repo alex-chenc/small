@@ -1,5 +1,7 @@
 # small
 
+[简体中文](README.md) | [English](README_EN.md)
+
 ## Build
 
 ```bash
@@ -32,3 +34,7 @@ Examples:
 ./small check the current system memory usage
 ./small "find the 10 largest files in the current directory, but do not delete anything"
 ```
+
+## License
+
+[Apache License 2.0](LICENSE)
