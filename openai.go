@@ -142,8 +142,29 @@ func requestUserInputTool() chatToolDefinition {
 	}
 }
 
+func finishTaskTool() chatToolDefinition {
+	return chatToolDefinition{
+		Type: "function",
+		Function: chatFunctionDefinition{
+			Name:        "finish_task",
+			Description: "Finish the task when no command or user input is needed. The summary is shown as the final response. Call this tool alone.",
+			Parameters: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"summary": map[string]any{
+						"type":        "string",
+						"description": "A concise final summary of the completed task, verification result, and any unresolved problem.",
+					},
+				},
+				"required": []string{"summary"},
+			},
+		},
+	}
+}
+
 func agentTools() []chatToolDefinition {
-	return []chatToolDefinition{execCommandTool(), requestUserInputTool()}
+	return []chatToolDefinition{execCommandTool(), requestUserInputTool(), finishTaskTool()}
 }
 
 func (c *OpenAIClient) createResponse(
@@ -156,7 +177,7 @@ func (c *OpenAIClient) createResponse(
 		Model:      c.model,
 		Messages:   messages,
 		Tools:      agentTools(),
-		ToolChoice: "auto",
+		ToolChoice: "required",
 		Stream:     true,
 	})
 	if err != nil {
@@ -175,7 +196,7 @@ func (c *OpenAIClient) createResponse(
 				return chatResponse{}, ctx.Err()
 			}
 			if attempt >= maxAPIRetries {
-				return chatResponse{}, fmt.Errorf("call OpenAPI endpoint (failed after %d retries): %w", maxAPIRetries, requestErr)
+				return chatResponse{}, fmt.Errorf("call OpenAI-compatible endpoint (failed after %d retries): %w", maxAPIRetries, requestErr)
 			}
 			delay := exponentialRetryDelay(attempt)
 			notifyRetry(onRetry, apiRetryEvent{
@@ -191,7 +212,7 @@ func (c *OpenAIClient) createResponse(
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBytes))
 			_ = resp.Body.Close()
 			if readErr != nil {
-				return chatResponse{}, fmt.Errorf("OpenAPI endpoint returned HTTP %d and its error body could not be read: %w", resp.StatusCode, readErr)
+				return chatResponse{}, fmt.Errorf("OpenAI-compatible endpoint returned HTTP %d and its error body could not be read: %w", resp.StatusCode, readErr)
 			}
 			bodyText := strings.TrimSpace(string(body))
 			if isRetryableStatus(resp.StatusCode) && attempt < maxAPIRetries {
@@ -208,9 +229,9 @@ func (c *OpenAIClient) createResponse(
 				continue
 			}
 			if isRetryableStatus(resp.StatusCode) {
-				return chatResponse{}, fmt.Errorf("OpenAPI endpoint returned HTTP %d (still failing after %d retries): %s", resp.StatusCode, maxAPIRetries, bodyText)
+				return chatResponse{}, fmt.Errorf("OpenAI-compatible endpoint returned HTTP %d (still failing after %d retries): %s", resp.StatusCode, maxAPIRetries, bodyText)
 			}
-			return chatResponse{}, fmt.Errorf("OpenAPI endpoint returned HTTP %d: %s", resp.StatusCode, bodyText)
+			return chatResponse{}, fmt.Errorf("OpenAI-compatible endpoint returned HTTP %d: %s", resp.StatusCode, bodyText)
 		}
 
 		defer resp.Body.Close()
@@ -303,13 +324,13 @@ type chatCompletion struct {
 func decodeChatJSON(r io.Reader) (chatResponse, error) {
 	var completion chatCompletion
 	if err := json.NewDecoder(r).Decode(&completion); err != nil {
-		return chatResponse{}, fmt.Errorf("decode OpenAPI response: %w", err)
+		return chatResponse{}, fmt.Errorf("decode OpenAI-compatible response: %w", err)
 	}
 	if completion.Error != nil {
 		return chatResponse{}, completion.Error
 	}
 	if len(completion.Choices) == 0 {
-		return chatResponse{}, errors.New("OpenAPI response contains no choices")
+		return chatResponse{}, errors.New("OpenAI-compatible response contains no choices")
 	}
 	message := completion.Choices[0].Message
 	if message.Role == "" {
@@ -351,7 +372,7 @@ func decodeChatSSE(r io.Reader, onText func(string)) (chatResponse, error) {
 		}
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return fmt.Errorf("decode OpenAPI SSE event: %w", err)
+			return fmt.Errorf("decode OpenAI-compatible SSE event: %w", err)
 		}
 		if chunk.Error != nil {
 			return chunk.Error
@@ -388,7 +409,7 @@ func decodeChatSSE(r io.Reader, onText func(string)) (chatResponse, error) {
 		return chatResponse{}, err
 	}
 	if !sawEvent {
-		return chatResponse{}, errors.New("OpenAPI stream ended before a valid event was received")
+		return chatResponse{}, errors.New("OpenAI-compatible stream ended before a valid event was received")
 	}
 
 	indices := make([]int, 0, len(partialCalls))
@@ -447,7 +468,7 @@ func scanSSEData(r io.Reader, handle func(string) error) error {
 		return err
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read OpenAPI SSE response: %w", err)
+		return fmt.Errorf("read OpenAI-compatible SSE response: %w", err)
 	}
 	return nil
 }

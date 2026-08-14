@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 )
 
 const maxAgentTurns = 30
@@ -43,6 +42,10 @@ type requestUserInputArguments struct {
 type requestUserInputResult struct {
 	Answer string `json:"answer"`
 	Error  string `json:"error,omitempty"`
+}
+
+type finishTaskArguments struct {
+	Summary string `json:"summary"`
 }
 
 type toolErrorResult struct {
@@ -215,7 +218,7 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 				stdout.ensureLineStart()
 				fmt.Fprintf(
 					stdout,
-					"◆ OpenAPI temporarily unavailable: %s; retrying in %s (%d/%d)\n",
+					"◆ OpenAI-compatible API temporarily unavailable: %s; retrying in %s (%d/%d)\n",
 					reason,
 					formatRetryDelay(event.Delay),
 					event.Attempt,
@@ -232,47 +235,17 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 
 		messages = append(messages, response.Message)
 		if len(response.Message.ToolCalls) == 0 {
-			inputRequired := responseRequestsInput(response.Message.Content)
-			if inputRequired || interactiveInput {
-				stdout.ensureLineStart()
-				if inputRequired {
-					fmt.Fprintln(stdout, "? Enter your response to continue:")
-				} else {
-					fmt.Fprintln(stdout, "? Follow-up (press Enter to finish):")
-				}
-				fmt.Fprint(stdout, "> ")
-				answer, err := readUserInput(ctx, inputReader)
-				finishInputPrompt(stdout, interactiveInput)
-				if err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					if inputRequired {
-						fmt.Fprintf(stdout, "└ Input unavailable: %s\n", err)
-					}
-					return nil
-				}
-				answer = strings.TrimSpace(answer)
-				if answer == "" && !inputRequired {
-					fmt.Fprintln(stdout, "└ Finished")
-					return nil
-				}
-				fmt.Fprintln(stdout, "└ Input received")
-				messages = append(messages, chatMessage{Role: "user", Content: answer})
-				continue
-			}
 			stdout.ensureLineStart()
-			return nil
+			return errors.New("model returned no tool call while tool_choice is required")
 		}
 
-		hasInputRequest := false
+		controlCalls := 0
 		for _, toolCall := range response.Message.ToolCalls {
-			if toolCall.Function.Name == "request_user_input" {
-				hasInputRequest = true
-				break
+			if toolCall.Function.Name == "request_user_input" || toolCall.Function.Name == "finish_task" {
+				controlCalls++
 			}
 		}
-		inputHandled := false
+		exclusiveControlConflict := controlCalls > 0 && len(response.Message.ToolCalls) > 1
 		for _, toolCall := range response.Message.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -291,14 +264,26 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 			}
 
 			var result any
-			if hasInputRequest && call.Name != "request_user_input" {
-				result = toolErrorResult{Error: "tool call was not executed because user input was requested in the same response; consider the user's answer before calling another tool"}
-			} else if call.Name == "request_user_input" && inputHandled {
-				result = toolErrorResult{Error: "only one request_user_input call is allowed per response"}
-			} else {
-				if call.Name == "request_user_input" {
-					inputHandled = true
+			if exclusiveControlConflict {
+				result = toolErrorResult{Error: "request_user_input and finish_task must each be called alone in a response"}
+			} else if call.Name == "finish_task" {
+				var args finishTaskArguments
+				if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+					result = toolErrorResult{Error: "finish_task arguments are not valid JSON: " + err.Error()}
+				} else if args.Summary = strings.TrimSpace(args.Summary); args.Summary == "" {
+					result = toolErrorResult{Error: "finish_task.summary must not be empty"}
+				} else {
+					if strings.TrimSpace(response.Message.Content) != args.Summary {
+						stdout.ensureLineStart()
+						finalOutput := &compactModelOutput{
+							output: &prefixedWriter{output: stdout, prefix: "● "},
+						}
+						finalOutput.WriteText(args.Summary)
+					}
+					stdout.ensureLineStart()
+					return nil
 				}
+			} else {
 				result, err = a.executeCall(ctx, call, inputReader, interactiveInput, stdout, stderr)
 				if err != nil {
 					return err
@@ -319,72 +304,6 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 	}
 
 	return fmt.Errorf("agent exceeded the maximum turn limit of %d", maxAgentTurns)
-}
-
-func responseRequestsInput(text string) bool {
-	if containsChoiceList(text) {
-		return true
-	}
-
-	runes := []rune(strings.TrimSpace(text))
-	const tailLength = 512
-	if len(runes) > tailLength {
-		runes = runes[len(runes)-tailLength:]
-	}
-
-	for index, current := range runes {
-		if current == '\uFF1F' {
-			return true
-		}
-		if current != '?' {
-			continue
-		}
-		if index == len(runes)-1 {
-			return true
-		}
-		next := runes[index+1]
-		if unicode.IsSpace(next) || strings.ContainsRune("\"'`*_)]}", next) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsChoiceList(text string) bool {
-	seen := make(map[string]struct{})
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimLeft(strings.TrimSpace(line), "-+*`> \t")
-		runes := []rune(line)
-		if len(runes) < 2 {
-			continue
-		}
-
-		var key string
-		switch {
-		case runes[0] >= 'A' && runes[0] <= 'Z' && isChoiceSeparator(runes[1]):
-			key = string(runes[0])
-		case runes[0] >= '0' && runes[0] <= '9':
-			end := 1
-			for end < len(runes) && runes[end] >= '0' && runes[end] <= '9' {
-				end++
-			}
-			if end < len(runes) && isChoiceSeparator(runes[end]) {
-				key = string(runes[:end])
-			}
-		}
-		if key == "" {
-			continue
-		}
-		seen[key] = struct{}{}
-		if len(seen) >= 2 {
-			return true
-		}
-	}
-	return false
-}
-
-func isChoiceSeparator(value rune) bool {
-	return value == '.' || value == ')' || value == ':'
 }
 
 func formatRetryDelay(delay time.Duration) string {

@@ -39,7 +39,7 @@ Examples:
 ./small "find the 10 largest files in the current directory, but do not delete anything"
 ```
 
-When required information or confirmation is missing, the program displays a question in the current terminal and waits for one line of input. You can also enter a follow-up after the model returns a final response, or press Enter to finish.
+The model decides whether required information or confirmation is missing. When needed, the program displays its question in the current terminal and waits for one line of input before continuing in the same process.
 
 ## License
 

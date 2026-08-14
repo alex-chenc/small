@@ -72,7 +72,14 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 
 		writeSSE(t, w, map[string]any{
 			"choices": []any{map[string]any{"delta": map[string]any{
-				"role": "assistant", "content": "\n\nDone: the command completed successfully.\n\n",
+				"role": "assistant",
+				"tool_calls": []any{map[string]any{
+					"index": 0, "id": "finish_1", "type": "function",
+					"function": map[string]any{
+						"name":      "finish_task",
+						"arguments": `{"summary":"Done: the command completed successfully."}`,
+					},
+				}},
 			}}},
 		})
 		writeSSEDone(w)
@@ -122,12 +129,13 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
-	if !requests[0].Stream || requests[0].ToolChoice != "auto" {
+	if !requests[0].Stream || requests[0].ToolChoice != "required" {
 		t.Errorf("unexpected request settings: %+v", requests[0])
 	}
-	if len(requests[0].Tools) != 2 ||
+	if len(requests[0].Tools) != 3 ||
 		requests[0].Tools[0].Function.Name != "exec_command" ||
-		requests[0].Tools[1].Function.Name != "request_user_input" {
+		requests[0].Tools[1].Function.Name != "request_user_input" ||
+		requests[0].Tools[2].Function.Name != "finish_task" {
 		t.Errorf("unexpected tools: %+v", requests[0].Tools)
 	}
 	if len(requests[0].Messages) != 2 || requests[0].Messages[0].Role != "system" || requests[0].Messages[1].Role != "user" {
@@ -187,7 +195,7 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 		if !foundAnswer {
 			t.Errorf("request did not contain the expected user answer: %+v", request.Messages)
 		}
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Confirmed."}}]}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"finish_1","type":"function","function":{"name":"finish_task","arguments":"{\"summary\":\"Confirmed.\"}"}}]}}]}`)
 	}))
 	defer server.Close()
 
@@ -226,31 +234,10 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 	}
 }
 
-func TestAgentFallsBackToInputForPlainTextQuestion(t *testing.T) {
-	var requests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		var request chatRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode request: %v", err)
-			return
-		}
-
+func TestAgentRejectsPlainTextWithoutRequiredTool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if requests == 1 {
-			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Choose option 1 or 2\uff1f Option 1 is recommended."}}]}`)
-			return
-		}
-
-		if len(request.Messages) == 0 {
-			t.Error("follow-up request contains no messages")
-		} else {
-			last := request.Messages[len(request.Messages)-1]
-			if last.Role != "user" || last.Content != "1" {
-				t.Errorf("last message = %+v, want user answer", last)
-			}
-		}
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Option 1 selected."}}]}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Choose an option."}}]}`)
 	}))
 	defer server.Close()
 
@@ -264,47 +251,16 @@ func TestAgentFallsBackToInputForPlainTextQuestion(t *testing.T) {
 			httpClient:   server.Client(),
 		},
 		executor: &CommandExecutor{cwd: t.TempDir()},
-		stdin:    strings.NewReader("1\n"),
+		stdin:    strings.NewReader("yes\n"),
 		stdout:   &stdout,
 		stderr:   &stderr,
 	}
-	if err := agent.Run(context.Background(), "choose a test option"); err != nil {
+	err := agent.Run(context.Background(), "choose a test option")
+	if err == nil || !strings.Contains(err.Error(), "tool_choice is required") {
 		t.Fatalf("Agent.Run() error = %v", err)
 	}
-	if requests != 2 {
-		t.Fatalf("request count = %d, want 2", requests)
-	}
-	for _, expected := range []string{
-		"? Enter your response to continue:",
-		"> \n└ Input received",
-		"● Option 1 selected.",
-	} {
-		if !strings.Contains(stdout.String(), expected) {
-			t.Errorf("stdout does not contain %q:\n%s", expected, stdout.String())
-		}
-	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q", stderr.String())
-	}
-}
-
-func TestResponseRequestsInput(t *testing.T) {
-	tests := []struct {
-		text string
-		want bool
-	}{
-		{text: "Which option do you want?", want: true},
-		{text: "Which option do you want? Option 1 is recommended.", want: true},
-		{text: "Choose option 1 or 2\uFF1F Option 1 is recommended.", want: true},
-		{text: "**A. Do nothing**\n**B. Clear the cache**\nTell me which option to run.", want: true},
-		{text: "1) Do nothing\n2) Clear the cache\nSelect an option.", want: true},
-		{text: "The task completed successfully.", want: false},
-		{text: "The matching pattern is file?.txt.", want: false},
-	}
-	for _, test := range tests {
-		if got := responseRequestsInput(test.text); got != test.want {
-			t.Errorf("responseRequestsInput(%q) = %v, want %v", test.text, got, test.want)
-		}
+	if strings.Contains(stdout.String(), "? ") || strings.Contains(stdout.String(), "> ") {
+		t.Fatalf("plain text was incorrectly treated as an input request:\n%s", stdout.String())
 	}
 }
 
