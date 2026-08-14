@@ -232,9 +232,14 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 
 		messages = append(messages, response.Message)
 		if len(response.Message.ToolCalls) == 0 {
-			if responseRequestsInput(response.Message.Content) {
+			inputRequired := responseRequestsInput(response.Message.Content)
+			if inputRequired || interactiveInput {
 				stdout.ensureLineStart()
-				fmt.Fprintln(stdout, "? Enter your response to continue:")
+				if inputRequired {
+					fmt.Fprintln(stdout, "? Enter your response to continue:")
+				} else {
+					fmt.Fprintln(stdout, "? Follow-up (press Enter to finish):")
+				}
 				fmt.Fprint(stdout, "> ")
 				answer, err := readUserInput(ctx, inputReader)
 				finishInputPrompt(stdout, interactiveInput)
@@ -242,11 +247,18 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
-					fmt.Fprintf(stdout, "└ Input unavailable: %s\n", err)
+					if inputRequired {
+						fmt.Fprintf(stdout, "└ Input unavailable: %s\n", err)
+					}
+					return nil
+				}
+				answer = strings.TrimSpace(answer)
+				if answer == "" && !inputRequired {
+					fmt.Fprintln(stdout, "└ Finished")
 					return nil
 				}
 				fmt.Fprintln(stdout, "└ Input received")
-				messages = append(messages, chatMessage{Role: "user", Content: strings.TrimSpace(answer)})
+				messages = append(messages, chatMessage{Role: "user", Content: answer})
 				continue
 			}
 			stdout.ensureLineStart()
@@ -310,6 +322,10 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 }
 
 func responseRequestsInput(text string) bool {
+	if containsChoiceList(text) {
+		return true
+	}
+
 	runes := []rune(strings.TrimSpace(text))
 	const tailLength = 512
 	if len(runes) > tailLength {
@@ -332,6 +348,43 @@ func responseRequestsInput(text string) bool {
 		}
 	}
 	return false
+}
+
+func containsChoiceList(text string) bool {
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimLeft(strings.TrimSpace(line), "-+*`> \t")
+		runes := []rune(line)
+		if len(runes) < 2 {
+			continue
+		}
+
+		var key string
+		switch {
+		case runes[0] >= 'A' && runes[0] <= 'Z' && isChoiceSeparator(runes[1]):
+			key = string(runes[0])
+		case runes[0] >= '0' && runes[0] <= '9':
+			end := 1
+			for end < len(runes) && runes[end] >= '0' && runes[end] <= '9' {
+				end++
+			}
+			if end < len(runes) && isChoiceSeparator(runes[end]) {
+				key = string(runes[:end])
+			}
+		}
+		if key == "" {
+			continue
+		}
+		seen[key] = struct{}{}
+		if len(seen) >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func isChoiceSeparator(value rune) bool {
+	return value == '.' || value == ')' || value == ':'
 }
 
 func formatRetryDelay(delay time.Duration) string {

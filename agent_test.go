@@ -296,6 +296,8 @@ func TestResponseRequestsInput(t *testing.T) {
 		{text: "Which option do you want?", want: true},
 		{text: "Which option do you want? Option 1 is recommended.", want: true},
 		{text: "Choose option 1 or 2\uFF1F Option 1 is recommended.", want: true},
+		{text: "**A. Do nothing**\n**B. Clear the cache**\nTell me which option to run.", want: true},
+		{text: "1) Do nothing\n2) Clear the cache\nSelect an option.", want: true},
 		{text: "The task completed successfully.", want: false},
 		{text: "The matching pattern is file?.txt.", want: false},
 	}
