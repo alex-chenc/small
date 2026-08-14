@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const maxAgentTurns = 30
@@ -136,6 +138,12 @@ func (o *terminalOutput) ensureLineStart() {
 	}
 }
 
+func (o *terminalOutput) markLineStart() {
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	o.state.atLineStart = true
+}
+
 type compactModelOutput struct {
 	output       io.Writer
 	started      bool
@@ -177,6 +185,7 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 		input = strings.NewReader("")
 	}
 	inputReader := bufio.NewReader(input)
+	interactiveInput := isTerminalStream(input) && isTerminalStream(a.stdout)
 
 	messages := []chatMessage{
 		{Role: "system", Content: a.client.instructions},
@@ -223,6 +232,23 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 
 		messages = append(messages, response.Message)
 		if len(response.Message.ToolCalls) == 0 {
+			if responseRequestsInput(response.Message.Content) {
+				stdout.ensureLineStart()
+				fmt.Fprintln(stdout, "? Enter your response to continue:")
+				fmt.Fprint(stdout, "> ")
+				answer, err := readUserInput(ctx, inputReader)
+				finishInputPrompt(stdout, interactiveInput)
+				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					fmt.Fprintf(stdout, "└ Input unavailable: %s\n", err)
+					return nil
+				}
+				fmt.Fprintln(stdout, "└ Input received")
+				messages = append(messages, chatMessage{Role: "user", Content: strings.TrimSpace(answer)})
+				continue
+			}
 			stdout.ensureLineStart()
 			return nil
 		}
@@ -261,7 +287,7 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 				if call.Name == "request_user_input" {
 					inputHandled = true
 				}
-				result, err = a.executeCall(ctx, call, inputReader, stdout, stderr)
+				result, err = a.executeCall(ctx, call, inputReader, interactiveInput, stdout, stderr)
 				if err != nil {
 					return err
 				}
@@ -283,6 +309,31 @@ func (a *Agent) Run(ctx context.Context, task string) error {
 	return fmt.Errorf("agent exceeded the maximum turn limit of %d", maxAgentTurns)
 }
 
+func responseRequestsInput(text string) bool {
+	runes := []rune(strings.TrimSpace(text))
+	const tailLength = 512
+	if len(runes) > tailLength {
+		runes = runes[len(runes)-tailLength:]
+	}
+
+	for index, current := range runes {
+		if current == '\uFF1F' {
+			return true
+		}
+		if current != '?' {
+			continue
+		}
+		if index == len(runes)-1 {
+			return true
+		}
+		next := runes[index+1]
+		if unicode.IsSpace(next) || strings.ContainsRune("\"'`*_)]}", next) {
+			return true
+		}
+	}
+	return false
+}
+
 func formatRetryDelay(delay time.Duration) string {
 	if delay < time.Second {
 		return fmt.Sprintf("%dms", delay.Milliseconds())
@@ -297,6 +348,7 @@ func (a *Agent) executeCall(
 	ctx context.Context,
 	call functionCall,
 	input *bufio.Reader,
+	interactiveInput bool,
 	stdout, stderr *terminalOutput,
 ) (any, error) {
 	switch call.Name {
@@ -335,7 +387,9 @@ func (a *Agent) executeCall(
 
 		stdout.ensureLineStart()
 		fmt.Fprintf(stdout, "? %s\n", question)
+		fmt.Fprint(stdout, "> ")
 		answer, err := readUserInput(ctx, input)
+		finishInputPrompt(stdout, interactiveInput)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -349,6 +403,23 @@ func (a *Agent) executeCall(
 	default:
 		return CommandResult{ExitCode: -1, Stderr: "unsupported tool: " + call.Name}, nil
 	}
+}
+
+func isTerminalStream(stream any) bool {
+	file, ok := stream.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func finishInputPrompt(output *terminalOutput, interactive bool) {
+	if interactive {
+		output.markLineStart()
+		return
+	}
+	output.ensureLineStart()
 }
 
 func readUserInput(ctx context.Context, input *bufio.Reader) (string, error) {

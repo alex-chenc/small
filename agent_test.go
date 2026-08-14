@@ -214,7 +214,7 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 	for _, expected := range []string{
 		"● I need confirmation.",
 		"? Proceed with the test?",
-		"└ Input received",
+		"> \n└ Input received",
 		"● Confirmed.",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
@@ -223,6 +223,86 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestAgentFallsBackToInputForPlainTextQuestion(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Choose option 1 or 2\uff1f Option 1 is recommended."}}]}`)
+			return
+		}
+
+		if len(request.Messages) == 0 {
+			t.Error("follow-up request contains no messages")
+		} else {
+			last := request.Messages[len(request.Messages)-1]
+			if last.Role != "user" || last.Content != "1" {
+				t.Errorf("last message = %+v, want user answer", last)
+			}
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Option 1 selected."}}]}`)
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	agent := Agent{
+		client: &OpenAIClient{
+			apiKey:       "test-key",
+			endpoint:     server.URL,
+			model:        "test-model",
+			instructions: "test instructions",
+			httpClient:   server.Client(),
+		},
+		executor: &CommandExecutor{cwd: t.TempDir()},
+		stdin:    strings.NewReader("1\n"),
+		stdout:   &stdout,
+		stderr:   &stderr,
+	}
+	if err := agent.Run(context.Background(), "choose a test option"); err != nil {
+		t.Fatalf("Agent.Run() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("request count = %d, want 2", requests)
+	}
+	for _, expected := range []string{
+		"? Enter your response to continue:",
+		"> \n└ Input received",
+		"● Option 1 selected.",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Errorf("stdout does not contain %q:\n%s", expected, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestResponseRequestsInput(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{text: "Which option do you want?", want: true},
+		{text: "Which option do you want? Option 1 is recommended.", want: true},
+		{text: "Choose option 1 or 2\uFF1F Option 1 is recommended.", want: true},
+		{text: "The task completed successfully.", want: false},
+		{text: "The matching pattern is file?.txt.", want: false},
+	}
+	for _, test := range tests {
+		if got := responseRequestsInput(test.text); got != test.want {
+			t.Errorf("responseRequestsInput(%q) = %v, want %v", test.text, got, test.want)
+		}
 	}
 }
 
