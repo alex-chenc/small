@@ -32,8 +32,8 @@ type OpenAIClient struct {
 type chatRequest struct {
 	Model      string               `json:"model"`
 	Messages   []chatMessage        `json:"messages"`
-	Tools      []chatToolDefinition `json:"tools"`
-	ToolChoice string               `json:"tool_choice"`
+	Tools      []chatToolDefinition `json:"tools,omitempty"`
+	ToolChoice string               `json:"tool_choice,omitempty"`
 	Stream     bool                 `json:"stream"`
 }
 
@@ -147,14 +147,14 @@ func finishTaskTool() chatToolDefinition {
 		Type: "function",
 		Function: chatFunctionDefinition{
 			Name:        "finish_task",
-			Description: "Finish the task when no command or user input is needed. The summary is shown as the final response. Call this tool alone.",
+			Description: "Finish the task and return a concise final summary when no more commands or user input are needed. Call this tool alone.",
 			Parameters: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]any{
 					"summary": map[string]any{
 						"type":        "string",
-						"description": "A concise final summary of the completed task, verification result, and any unresolved problem.",
+						"description": "A concise final summary of what was done, the verification result, and any unresolved problem.",
 					},
 				},
 				"required": []string{"summary"},
@@ -173,13 +173,35 @@ func (c *OpenAIClient) createResponse(
 	onText func(string),
 	onRetry func(apiRetryEvent),
 ) (chatResponse, error) {
-	payload, err := json.Marshal(chatRequest{
+	return c.createChatCompletion(ctx, chatRequest{
 		Model:      c.model,
 		Messages:   messages,
 		Tools:      agentTools(),
-		ToolChoice: "required",
+		ToolChoice: "auto",
 		Stream:     true,
-	})
+	}, onText, onRetry)
+}
+
+func (c *OpenAIClient) createTextResponse(
+	ctx context.Context,
+	messages []chatMessage,
+	onRetry func(apiRetryEvent),
+) (chatResponse, error) {
+	return c.createChatCompletion(ctx, chatRequest{
+		Model:      c.model,
+		Messages:   messages,
+		ToolChoice: "none",
+		Stream:     false,
+	}, nil, onRetry)
+}
+
+func (c *OpenAIClient) createChatCompletion(
+	ctx context.Context,
+	request chatRequest,
+	onText func(string),
+	onRetry func(apiRetryEvent),
+) (chatResponse, error) {
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("encode API request: %w", err)
 	}

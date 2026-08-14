@@ -43,8 +43,9 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 		requestNumber := len(requests)
 		mu.Unlock()
 
-		w.Header().Set("Content-Type", "text/event-stream")
-		if requestNumber == 1 {
+		switch requestNumber {
+		case 1:
+			w.Header().Set("Content-Type", "text/event-stream")
 			writeSSE(t, w, map[string]any{
 				"choices": []any{map[string]any{"delta": map[string]any{
 					"role": "assistant", "content": "\n\nPlan: run the test command.\n\n",
@@ -68,21 +69,14 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 			})
 			writeSSEDone(w)
 			return
+		case 2:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Done: the command completed successfully.","tool_calls":[{"id":"finish_1","type":"function","function":{"name":"finish_task","arguments":"{\"summary\":\"Done: the command completed successfully.\"}"}}]}}]}`)
+			return
+		default:
+			t.Errorf("unexpected request number %d", requestNumber)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
-
-		writeSSE(t, w, map[string]any{
-			"choices": []any{map[string]any{"delta": map[string]any{
-				"role": "assistant",
-				"tool_calls": []any{map[string]any{
-					"index": 0, "id": "finish_1", "type": "function",
-					"function": map[string]any{
-						"name":      "finish_task",
-						"arguments": `{"summary":"Done: the command completed successfully."}`,
-					},
-				}},
-			}}},
-		})
-		writeSSEDone(w)
 	}))
 	defer server.Close()
 
@@ -112,6 +106,7 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 		"│ integration-ok",
 		"└ Exit code 0",
 		"● Done: the command completed successfully.",
+		"◆ Task complete",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("stdout does not contain %q:\n%s", expected, output)
@@ -129,7 +124,7 @@ func TestAgentRunsCommandThroughChatCompletions(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
-	if !requests[0].Stream || requests[0].ToolChoice != "required" {
+	if !requests[0].Stream || requests[0].ToolChoice != "auto" {
 		t.Errorf("unexpected request settings: %+v", requests[0])
 	}
 	if len(requests[0].Tools) != 3 ||
@@ -175,27 +170,32 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if requests == 1 {
+		switch requests {
+		case 1:
 			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"I need confirmation.","tool_calls":[{"id":"input_1","type":"function","function":{"name":"request_user_input","arguments":"{\"question\":\"Proceed with the test?\"}"}}]}}]}`)
 			return
-		}
-
-		var foundAnswer bool
-		for _, message := range request.Messages {
-			if message.Role != "tool" || message.ToolCallID != "input_1" {
-				continue
+		case 2:
+			var foundAnswer bool
+			for _, message := range request.Messages {
+				if message.Role != "tool" || message.ToolCallID != "input_1" {
+					continue
+				}
+				var result requestUserInputResult
+				if err := json.Unmarshal([]byte(message.Content), &result); err != nil {
+					t.Errorf("decode input result: %v", err)
+					continue
+				}
+				foundAnswer = result.Answer == "yes" && result.Error == ""
 			}
-			var result requestUserInputResult
-			if err := json.Unmarshal([]byte(message.Content), &result); err != nil {
-				t.Errorf("decode input result: %v", err)
-				continue
+			if !foundAnswer {
+				t.Errorf("request did not contain the expected user answer: %+v", request.Messages)
 			}
-			foundAnswer = result.Answer == "yes" && result.Error == ""
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Confirmed.","tool_calls":[{"id":"finish_1","type":"function","function":{"name":"finish_task","arguments":"{\"summary\":\"Confirmed.\"}"}}]}}]}`)
+			return
+		default:
+			t.Errorf("unexpected request number %d", requests)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
-		if !foundAnswer {
-			t.Errorf("request did not contain the expected user answer: %+v", request.Messages)
-		}
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"finish_1","type":"function","function":{"name":"finish_task","arguments":"{\"summary\":\"Confirmed.\"}"}}]}}]}`)
 	}))
 	defer server.Close()
 
@@ -224,6 +224,7 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 		"? Proceed with the test?",
 		"> \n└ Input received",
 		"● Confirmed.",
+		"◆ Task complete",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Errorf("stdout does not contain %q:\n%s", expected, stdout.String())
@@ -234,10 +235,39 @@ func TestAgentRequestsUserInputAndContinues(t *testing.T) {
 	}
 }
 
-func TestAgentRejectsPlainTextWithoutRequiredTool(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestAgentUsesModelDecisionForPlainTextInputRequest(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Choose an option."}}]}`)
+		switch requests {
+		case 1:
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Available options:\nA. Do nothing\nB. Clear cache\nTell me which option to run."}}]}`)
+		case 2:
+			if request.ToolChoice != "none" || request.Stream || len(request.Tools) != 0 {
+				t.Errorf("unexpected control decision request: %+v", request)
+			}
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"{\"action\":\"request_user_input\",\"question\":\"Which option should I run?\"}"}}]}`)
+		case 3:
+			if len(request.Messages) == 0 {
+				t.Error("continuation request did not contain messages")
+			} else {
+				last := request.Messages[len(request.Messages)-1]
+				if last.Role != "user" || last.Content != "B" {
+					t.Errorf("last continuation message = %+v, want user answer B", last)
+				}
+			}
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Option B selected.","tool_calls":[{"id":"finish_1","type":"function","function":{"name":"finish_task","arguments":"{\"summary\":\"Option B selected.\"}"}}]}}]}`)
+		default:
+			t.Errorf("unexpected request number %d", requests)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
 	}))
 	defer server.Close()
 
@@ -251,16 +281,125 @@ func TestAgentRejectsPlainTextWithoutRequiredTool(t *testing.T) {
 			httpClient:   server.Client(),
 		},
 		executor: &CommandExecutor{cwd: t.TempDir()},
-		stdin:    strings.NewReader("yes\n"),
+		stdin:    strings.NewReader("B\n"),
 		stdout:   &stdout,
 		stderr:   &stderr,
 	}
-	err := agent.Run(context.Background(), "choose a test option")
-	if err == nil || !strings.Contains(err.Error(), "tool_choice is required") {
+	if err := agent.Run(context.Background(), "choose a test option"); err != nil {
 		t.Fatalf("Agent.Run() error = %v", err)
 	}
-	if strings.Contains(stdout.String(), "? ") || strings.Contains(stdout.String(), "> ") {
-		t.Fatalf("plain text was incorrectly treated as an input request:\n%s", stdout.String())
+	if requests != 3 {
+		t.Fatalf("request count = %d, want 3", requests)
+	}
+	for _, expected := range []string{
+		"● Available options:",
+		"◆ Resolving next action...",
+		"? Which option should I run?",
+		"> \n└ Input received",
+		"● Option B selected.",
+		"◆ Task complete",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Errorf("stdout does not contain %q:\n%s", expected, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestAgentUsesFallbackDecisionForPlainTextFinalResponse(t *testing.T) {
+	var requests []chatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		requests = append(requests, request)
+		w.Header().Set("Content-Type", "application/json")
+		switch len(requests) {
+		case 1:
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"The task is already complete."}}]}`)
+		case 2:
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"{\"action\":\"finish\"}"}}]}`)
+		default:
+			t.Errorf("unexpected request number %d", len(requests))
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	agent := Agent{
+		client: &OpenAIClient{
+			apiKey:       "test-key",
+			endpoint:     server.URL,
+			model:        "test-model",
+			instructions: "test instructions",
+			httpClient:   server.Client(),
+		},
+		executor: &CommandExecutor{cwd: t.TempDir()},
+		stdout:   &stdout,
+		stderr:   &stderr,
+	}
+	if err := agent.Run(context.Background(), "report completion"); err != nil {
+		t.Fatalf("Agent.Run() error = %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if requests[1].ToolChoice != "none" || requests[1].Stream || len(requests[1].Tools) != 0 {
+		t.Errorf("unexpected fallback decision request: %+v", requests[1])
+	}
+	for _, expected := range []string{
+		"● The task is already complete.",
+		"◆ Resolving next action...",
+		"◆ Task complete",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Errorf("stdout does not contain %q:\n%s", expected, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestParseControlDecision(t *testing.T) {
+	tests := []struct {
+		name          string
+		text          string
+		want          controlDecision
+		wantErrorPart string
+	}{
+		{name: "finish", text: `{"action":"finish"}`, want: controlDecision{Action: "finish"}},
+		{
+			name: "input with markdown wrapper",
+			text: "```json\n{\"action\":\"request_user_input\",\"question\":\"  Which   option?  \"}\n```",
+			want: controlDecision{Action: "request_user_input", Question: "Which option?"},
+		},
+		{name: "missing question", text: `{"action":"request_user_input"}`, wantErrorPart: "without a question"},
+		{name: "unknown action", text: `{"action":"continue"}`, wantErrorPart: "unsupported"},
+		{name: "invalid response", text: "finish", wantErrorPart: "JSON object"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseControlDecision(test.text)
+			if test.wantErrorPart != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErrorPart) {
+					t.Fatalf("parseControlDecision() error = %v, want containing %q", err, test.wantErrorPart)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseControlDecision() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("parseControlDecision() = %+v, want %+v", got, test.want)
+			}
+		})
 	}
 }
 
