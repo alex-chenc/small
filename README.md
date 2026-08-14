@@ -5,7 +5,7 @@
 ## 构建
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o small .
+make
 ```
 
 ## 配置
