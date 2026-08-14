@@ -2,6 +2,10 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
+`small` is a minimal AI agent for one-off Linux tasks. As AI CLI tools gain more features, they also become increasingly complex and heavyweight, while many situations only require AI to complete a single temporary task. `small` keeps task planning, command execution, and result reporting in one small binary, then exits without preserving a session.
+
+> **Security warning:** `small` has no sandbox, permission isolation, or operation approval mechanism. Model-generated commands are executed directly with the privileges of the current user. When run as `root`, commands have unrestricted system access. Incorrect or unexpected commands may cause data loss, system damage, or other serious consequences. Use it only in trusted or isolated environments.
+
 ## Build
 
 ```bash
